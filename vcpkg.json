@@ -1,0 +1,11 @@
+{
+  "name": "cpp-voice-agent",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "crow",
+    "boost-beast",
+    "boost-asio",
+    "nlohmann-json",
+    "openssl"
+  ]
+}
