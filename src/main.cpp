@@ -387,7 +387,10 @@ public:
         try {
             if (connected_) {
                 connected_ = false;
-                ws_.close(websocket::close_code::normal);
+                // Cancel the underlying socket to interrupt the blocking read,
+                // rather than calling ws_.close() which triggers a Boost Beast
+                // assertion (!impl.wr_close) when a read is in progress.
+                beast::get_lowest_layer(ws_).cancel();
             }
         } catch (...) {}
         if (thread_.joinable()) thread_.join();
@@ -403,8 +406,7 @@ private:
                 config.deepgram_agent_host, "443");
 
             // Connect TCP
-            auto ep = net::connect(
-                beast::get_lowest_layer(ws_), results);
+            beast::get_lowest_layer(ws_).connect(results);
 
             // Set SNI hostname for TLS
             if (!SSL_set_tlsext_host_name(
@@ -428,8 +430,7 @@ private:
                             "cpp-voice-agent/1.0");
                 }));
 
-            std::string host_port = config.deepgram_agent_host + ":443";
-            ws_.handshake(host_port, config.deepgram_agent_path);
+            ws_.handshake(config.deepgram_agent_host, config.deepgram_agent_path);
 
             connected_ = true;
             CROW_LOG_INFO << "Connected to Deepgram Agent API";
@@ -445,7 +446,10 @@ private:
                     buffer.data().size());
 
                 try {
-                    client_conn_.send_binary(payload);
+                    if (is_bin)
+                        client_conn_.send_binary(payload);
+                    else
+                        client_conn_.send_text(payload);
                 } catch (const std::exception& e) {
                     CROW_LOG_ERROR << "Error forwarding to client: " << e.what();
                     break;
@@ -463,10 +467,13 @@ private:
 
         connected_ = false;
 
-        // Notify the client that the upstream closed
-        try {
-            client_conn_.close("Deepgram disconnected");
-        } catch (...) {}
+        // Notify the client that the upstream closed (only if the client
+        // didn't initiate the close — running_ is set false by stop())
+        if (running_) {
+            try {
+                client_conn_.close("Deepgram disconnected");
+            } catch (...) {}
+        }
     }
 
     crow::websocket::connection& client_conn_;
@@ -608,6 +615,7 @@ int main() {
 
     // ---- WS /api/voice-agent - WebSocket proxy to Deepgram Agent API ----
     CROW_WEBSOCKET_ROUTE(app, "/api/voice-agent")
+        .mirrorprotocols()
         .onaccept([](const crow::request& req, void**) -> bool {
             // Validate session token from Sec-WebSocket-Protocol subprotocol
             std::string protocols = req.get_header_value("Sec-WebSocket-Protocol");
@@ -647,7 +655,7 @@ int main() {
         })
         .onclose([&conn_map, &conn_map_mutex](
                      crow::websocket::connection& conn,
-                     const std::string& reason) {
+                     const std::string& reason, uint16_t) {
             CROW_LOG_INFO << "Client disconnected: " << reason;
 
             std::shared_ptr<DeepgramSession> session;
